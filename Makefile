@@ -6,7 +6,7 @@ DEBUG = false
 
 # compiler
 #CXX = g++ -std=c++0x
-CXX = g++  -std=c++11
+CXX = icpc  -std=c++11 -pthread
 #CXX = clang++ -std=c++11 # uncomment me to compile with clang
 #CXX =  valgrind --leak-check=yes #uncomment if you want to check for memory leaks
 
@@ -52,7 +52,7 @@ INC = -I$(INC_DIR) -I$(BOOST_INC_DIR) -I$(GSL_INC_DIR)
 ifeq ($(DEBUG),true)
 	CXXFLAGS     = -O0 -Wall -ggdb -fPIC $(INC) $(ROOTCXXFLAGS)
 else
-	CXXFLAGS     = -O2  -Wall -std=c++0x -fPIC -Xlinker -zmuldefs  -Wno-unused-local-typedefs $(INC) $(ROOTCXXFLAGS)
+	CXXFLAGS     = -O3  -Wall -std=c++0x -fPIC -Xlinker -zmuldefs $(INC) $(ROOTCXXFLAGS)
 endif
 
 SOFLAGS      = -shared

@@ -24,6 +24,7 @@
 //#include <string>
 //#include <map>
 #include "TFile.h"
+#include <pthread.h>
 
 class RooAbsReal ;
 class RooFitResult ;
@@ -33,7 +34,7 @@ class RooArgList ;
 class RooAbsArg ;
 class TVirtualFitter ;
 class TH2D ;
-class Th1F ;
+class TH1F ;
 class RooPlot ;
 class TCanvas;
 class TFile;
@@ -59,7 +60,7 @@ public:
 
 //  RooFitResult* fit(const char* options) ;
 
-  Int_t mcmc(Int_t npoints, size_t cutoff, const char* errorstrategy = "gaus");
+  Int_t mcmc(Int_t npoints, size_t cutoff, const char* errorstrategy = "gaus", size_t nthreads = 1);
   TGraph* getProfile(const char* name, Bool_t cutoff = kTRUE);
   TMultiGraph* getWalkDis(const char* name, Bool_t cutoff = kTRUE);
   TH1F*   getWalkDisHis(const char* name,  Int_t nbinsx, Bool_t cutoff = kTRUE);
@@ -94,7 +95,13 @@ public:
   // Bool_t setLogFile(const char* logfile=0) ;
 
   static void cleanup() ;
-
+  void setSeed(Double_t seed)
+  {
+    _seed = seed;
+  };
+  void setAlphaStar(Double_t newAlpha) {
+    _alphaStar = newAlpha;
+  };
   // Int_t evalCounter() const { return _evalCounter ; }
   // void zeroEvalCount() { _evalCounter = 0 ; }
 
@@ -128,12 +135,14 @@ public:
      void updateFloatVec() ;
      void sortPointList(const char* name1) ;
      Int_t getIndex(const char* name) ;
+     static void *threadmcmc(void *threadarg);
      Double_t getMinList(const char* name);
      Double_t getMaxList(const char* name);
      void setFileName(const TString name)
      {
        _fileName = name;
      };
+
 //
  private:
 //
@@ -167,6 +176,8 @@ public:
    Bool_t      _verbose ;
    Bool_t     _gaus;
    Bool_t     _interval;
+   Double_t   _seed = 0;
+   Double_t  _alphaStar = 0.234;
 //   TStopwatch  _timer ;
 //   TStopwatch  _cumulTimer ;
 //
