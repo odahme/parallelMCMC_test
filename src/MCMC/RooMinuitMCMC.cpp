@@ -179,8 +179,8 @@ RooMinuitMCMC::RooMinuitMCMC(RooAbsReal& function)
   updateFloatVec() ;
 
 //   // Save snapshot of initial lists
-   _initFloatParamList = (RooArgList*) _floatParamList->snapshot(kFALSE) ;
-   _initConstParamList = (RooArgList*) _constParamList->snapshot(kFALSE) ;
+   _initFloatParamList = (RooArgList*) _floatParamList->snapshot(kTRUE) ;
+   _initConstParamList = (RooArgList*) _constParamList->snapshot(kTRUE) ;
 //
 //   // Initialize MINUIT
    Int_t nPar= _floatParamList->getSize() + _constParamList->getSize() ;
@@ -239,14 +239,17 @@ RooMinuitMCMC::~RooMinuitMCMC()
 struct thread_data{
  int  thread_id;
  Int_t npoints;
+ int indexofbest;
  TRandom3* rnd;
  TVectorD* last;
  TVectorD* curr;
  std::vector<RooArgList*> pointList;
  Bool_t verbose;
  RooArgList* paramList;
- RooMinuitMCMC* context;
  RooRealVar* nllval;
+ RooAbsReal* nll;
+ RooArgList* threadParamList;
+ RooRealVar* var;
 
  TMatrixDSym* identity;
  TMatrixDSym* SNminusone;
@@ -262,36 +265,74 @@ struct thread_data{
  TMatrixD* SNM;
 };
 
+pthread_attr_t attr;
+
 void *RooMinuitMCMC::threadmcmc(void *threadarg)
 {
   struct thread_data *my_data;
   my_data = (struct thread_data *) threadarg;
 
-  size_t id;
-  id = (int) my_data->thread_id ;
-  Int_t npoints = (Int_t) my_data->npoints;
-  size_t nparams = (size_t) my_data->last->GetNoElements();
+  RooAbsReal* nll = my_data->nll;
+  RooArgList* threadParamList = my_data->threadParamList;
+  RooArgList* paramList = my_data->paramList;
+  RooRealVar* nllval = my_data->nllval;
+  paramList->addClone(*nllval);
+  RooRealVar* var = my_data->var;
+
+
+
+
+
+
+  size_t* id = new size_t;
+  *id = (int) my_data->thread_id ;
+  Int_t* npoints = new Int_t;
+  *npoints = (Int_t) my_data->npoints;
+  size_t* nparams = new size_t;
+  *nparams = (size_t) my_data->last->GetNoElements();
   TVectorD* last = my_data->last;
   TVectorD* curr = my_data->curr;
-  RooRealVar* nllval = my_data->nllval;
   TRandom3 *rnd = my_data->rnd; //random generator with seed
+  my_data->pointList.reserve(*npoints);
 
-  unsigned int nstat = npoints*100;//number of tries
-  double maxstep = 0.01; //maximum step size
-  double alphastar = 0.234; //forced acceptance rate
-
-
-  Bool_t accepted;
-  unsigned int ntested = 0;
-  Int_t naccepted = 0;
+  TMatrixDSym* SNminusoneT = my_data->SNminusoneT;
+  TMatrixDSym* SNSNT = my_data->SNSNT;
+  TDecompChol* chol = my_data->chol;
+  TMatrixD* SNT = my_data->SNT;
+  TMatrixDSym* WNWNT = my_data->WNWNT;
 
 
 
 
-  double minllh = 1e32;
 
-  unsigned int nlast = 200;
-  std::vector<bool> lastaccepted;
+
+
+
+  //size_t mystacksize;
+  //pthread_attr_getstacksize (&attr, &mystacksize);
+
+  size_t* nstat = new size_t;
+  *nstat = *npoints * 100;//number of tries
+  double* maxstep = new double;
+  *maxstep = 0.01; //maximum step size
+  double* alphastar = new double;
+  *alphastar = 0.234; //forced acceptance rate
+
+
+  Bool_t* accepted = new Bool_t;
+  size_t* ntested = new size_t;
+  *ntested = 0;
+  Int_t* naccepted = new Int_t;
+  *naccepted = 0;
+
+
+
+
+  double* minllh = new double;
+  *minllh = 1e32;
+
+  size_t* nlast = new size_t;
+  *nlast = 200;
 
   TMatrixDSym* identity = my_data->identity;
   identity->UnitMatrix();
@@ -306,90 +347,110 @@ void *RooMinuitMCMC::threadmcmc(void *threadarg)
   SN->Zero();
 
 
-  Bool_t verbose = my_data->verbose;
+  Bool_t* verbose = new Bool_t;
+  *verbose = my_data->verbose;
+  Bool_t* errorOn = new Bool_t;
+  *errorOn = true;
 
-  RooMinuitMCMC* context = my_data->context;
 
   TVectorD* SW = my_data->SW;
   TVectorD* WN = my_data->WN;
-  for (unsigned int i = 0; i < nstat; i++) {
+  for(size_t index= 0; index < *nparams; index++) {
+    var = (RooRealVar*) threadParamList->at(index);
+    var->setVal((*last)[index]);
+  }
+  double* llh_last = new double;
+  *llh_last = nll->getVal(); //get nll for first parameters
+  double* llh_curr = new double;
+  double* alpha = new double;
+  double* r = new double;
+  double* acceptrate = new double;
+  double *etan = new double;
+  bool *success = new bool;
+
+  for (unsigned int i = 0; i < *nstat; i++) {
+
      *curr = *last;//use value of last for current then vary
 
 
     for (int j = 0; j < WN->GetNrows() ; j++) {
-      (*WN)[j] = rnd->Gaus(0.0, maxstep);
+      (*WN)[j] = rnd->Gaus(0.0, *maxstep);
     }
     *SW =  *SNminusone * *WN;
     *curr += *SW;
 
-    for(size_t index= 0; index < nparams; index++) {
-      context->setPdfParamVal(index, (*last)[index],verbose);
+
+
+    for(size_t index= 0; index < *nparams; index++) {
+      var = (RooRealVar*) threadParamList->at(index);
+      var->setVal((*curr)[index]);
     }
-    double llh_last = context->_func->getVal(); //get nll for last parameters
-    for(size_t index= 0; index < nparams; index++) {
-      context->setPdfParamVal(index, (*curr)[index],verbose);
-    }
-    double llh_curr = context->_func->getVal(); //get nll for current parameters
+
+     *llh_curr = nll->getVal(); //get nll for current parameters
 
     if (llh_curr != llh_curr) {
-      RooMsgService::instance().setGlobalKillBelow(RooFit::FATAL) ;
+      if (errorOn) {
+        errorOn = false;
+        RooMsgService::instance().setGlobalKillBelow(RooFit::FATAL) ;
+      }
       // std::cout << "press Enter to continue" << std::endl;
       // std::cin.ignore();
-      llh_curr = 1e16;
+      *llh_curr = 1e16;
     }
 
 
 
     if (llh_curr < minllh) {
-      minllh = llh_curr;
+      *minllh = *llh_curr;
+      my_data->indexofbest = *naccepted;
     }
 
-    double alpha = std::min(1.0, exp(llh_last - llh_curr));
-    double r = rnd->Uniform(0,1);
-    accepted = false;
-    double acceptrate = double(naccepted)/double(ntested);
-    if (r < alpha) {
+    *alpha = std::min(1.0, exp(llh_last - llh_curr));
+    *r = rnd->Uniform(0,1);
+    *accepted = false;
+    *acceptrate = double(*naccepted)/double(*ntested);
+    if (*r < *alpha) {
       //success
-      accepted = true;
-      nllval->setVal(llh_curr);
-      RooArgList* point = (RooArgList*) my_data->paramList->snapshot(kTRUE);
-      for (size_t index = 0; index < nparams; index++) {
-        RooRealVar* var = (RooRealVar*) point->at(index);
-        var->setVal((*curr)[index]);
+      *accepted = true;
+      for (size_t i = 0; i < *nparams; i++) {
+        var = (RooRealVar*) paramList->at(i);
+        var->setVal((*curr)[i]);
       }
-      point->addClone(*nllval);
-      my_data->pointList.push_back(point);
-      naccepted++;
+      var = (RooRealVar*) paramList->at(*nparams);
+      var->setVal(*llh_curr);
+
+      my_data->pointList.push_back((RooArgList*) paramList->snapshot(kTRUE));
+      *naccepted++;
       *last = *curr;
+      *llh_last = *llh_curr;
 
     } else {
       //reset to last candidate
-      accepted = false;
+      *accepted = false;
       *curr = *last;
     }
 
-    ntested++;
+    *ntested++;
     //update S matrix
-    my_data->SNminusoneT = new TMatrixDSym(*SNminusone);
-    TMatrixDSym* SNminusoneT = my_data->SNminusoneT;
+
+    SNminusoneT = new TMatrixDSym(*SNminusone);
+
     SNminusoneT->T();
-    double etan = std::min(1.0, nparams*pow(double(i), -2.0/3.0));
-    TMatrixDSym* WNWNT = my_data->WNWNT;
+    *etan = std::min(1.0, *nparams * pow(double(i), -2.0/3.0));
+
     WNWNT->Zero();
     for (int row = 0; row < WNWNT->GetNrows(); row++) {
       for (int col = 0; col < WNWNT->GetNcols(); col++) {
         (*WNWNT)[row][col] = (*WN)[row]*(*WN)[col]/WN->Norm2Sqr();
       }
     }
-    TMatrixDSym* SNSNT = my_data->SNSNT;
-    *SNSNT = ((*identity) + (*WNWNT)*etan*(alpha-alphastar));
+
+    *SNSNT = ((*identity) + (*WNWNT)* *etan *(*alpha-*alphastar));
     *SNSNT = SNSNT->Similarity(*SNminusone);
     //SNSNT = (SNminusone*identity*SNminusoneT);
-    TDecompChol* chol = my_data->chol;
     *chol = (*SNSNT);
-    bool success = chol->Decompose();
-    assert(success);
-    TMatrixD* SNT = my_data->SNT;
+    *success = chol->Decompose();
+    assert(*success);
     *SNT = chol->GetU();
     SNT->T();
     for (int row = 0; row < SNT->GetNrows(); row++) {
@@ -397,7 +458,7 @@ void *RooMinuitMCMC::threadmcmc(void *threadarg)
         (*SNminusone)[row][col] = (*SNT)[row][col];
       }
     }
-    if (naccepted == npoints) {
+    if (*naccepted == *npoints) {
       break;
     }
 
@@ -456,22 +517,27 @@ Int_t RooMinuitMCMC::mcmc(Int_t npoints, size_t cutoff, const char* errorstrateg
   pthread_attr_t attr;
   int rc;
   pthread_attr_init(&attr);
+  //pthread_attr_setstacksize (&attr, stacksize);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-  std::cout << "creating threads" << std::endl;
   for (size_t i = 0; i < nthreads; i++) {
-    RooMinuitMCMC* context = (RooMinuitMCMC*) RooMinuitMCMC::_theFitter->GetObjectFit();
     TRandom3* rnd = new TRandom3(_seed+i);
     string nllName = "nllval"+to_string(i);
     RooRealVar* nllval = new RooRealVar(nllName.c_str(),"nllval of parameters",-1);
     td[i].thread_id = i;
+    td[i].nll = (RooAbsReal*) _func->Clone();
+    RooArgSet* paramSet = td[i].nll->getParameters(RooArgSet()) ;
+    RooArgList paramList(*paramSet) ;
+    delete paramSet ;
+    td[i].threadParamList = (RooArgList*) paramList.selectByAttrib("Constant",kFALSE) ;
+    td[i].paramList = (RooArgList*) td[i].threadParamList->snapshot(kFALSE);
     td[i].npoints = npoints/nthreads;
+    std::cout << "npoints per thread = "<<npoints/nthreads << std::endl;
+    td[i].indexofbest = 0;
     td[i].rnd = (TRandom3*) rnd->Clone();
-    td[i].pointList.reserve(npoints/nthreads);
     td[i].last = (TVectorD*) last.Clone();
     td[i].curr = (TVectorD*) last.Clone();
     td[i].verbose = _verbose;
-    td[i].paramList = (RooArgList*) _floatParamList->snapshot(kTRUE);
-    td[i].context = context;
+    td[i].paramList = (RooArgList*) _floatParamList->snapshot(kFALSE);
     td[i].nllval = (RooRealVar*) nllval->Clone();
     TMatrixDSym identity(nparams);
     TMatrixDSym SNminusone(nparams);
@@ -512,159 +578,19 @@ Int_t RooMinuitMCMC::mcmc(Int_t npoints, size_t cutoff, const char* errorstrateg
       exit(-1);
       }
   }
-  std::cout << "threads finished" << std::endl;
+
+  int bestthread = td[0].indexofbest;
+  RooArgList* bestpoint = td[0].pointList[bestthread];
+  _floatParamList = (RooArgList*) bestpoint->snapshot(kTRUE);
+
   _pointList.reserve(npoints);
 
   for (size_t i = 0; i < nthreads; i++) {
     for (size_t j = 0; j < npoints/nthreads; j++) {
-      RooArgList* point = td[i].pointList[j];
+      RooArgList* point = (RooArgList*) td[i].pointList[j]->snapshot(kTRUE);
       _pointList.push_back(point);
     }
   }
-
-  std::cout << "_pointList filled" << std::endl;
-
-
-
-  //
-  // double minllh = 1e32;
-  //
-  // unsigned int nlast = 200;
-  // std::vector<bool> lastaccepted;
-  //
-  // TMatrixDSym identity(nparams);
-  // identity.UnitMatrix();
-  //
-  // TMatrixDSym S1(nparams);
-  // S1.Zero();
-  // S1 = identity;
-  //
-  // TMatrixDSym SNminusone(nparams);
-  // SNminusone = S1;
-  // TMatrixDSym SN(nparams);
-  // SN.Zero();
-  //
-  //
-  // Bool_t verbose = _verbose;
-  // std::clock_t starttime;
-  // starttime = std::clock();
-  //
-
-
-
-  // for (unsigned int i = 0; i < nstat; i++) {
-  //    RooMinuitMCMC* context = (RooMinuitMCMC*) RooMinuitMCMC::_theFitter->GetObjectFit() ;
-  //    curr = last;//use value of last for current then vary
-  //
-  //
-  //   TVectorD WN(nparams);
-  //   for (int j = 0; j < WN.GetNrows() ; j++) {
-  //     WN[j] = rnd->Gaus(0.0, maxstep);
-  //   }
-  //   TVectorD SW(SNminusone*WN);
-  //   curr += SW;
-  //
-  //   for(size_t index= 0; index < nparams; index++) {
-  //     context->setPdfParamVal(index, last[index],verbose);
-  //   }
-  //   double llh_last = context->_func->getVal(); //get nll for last parameters
-  //   for(size_t index= 0; index < nparams; index++) {
-  //     context->setPdfParamVal(index, curr[index],verbose);
-  //   }
-  //   double llh_curr = context->_func->getVal(); //get nll for current parameters
-  //
-  //   if (llh_curr != llh_curr) {
-  //     RooMsgService::instance().setGlobalKillBelow(RooFit::FATAL) ;
-  //     std::cout << "negative value in pdf encountert at try "<<i<<" setting nll to 1e16" << std::endl;
-  //     // std::cout << "press Enter to continue" << std::endl;
-  //     // std::cin.ignore();
-  //     llh_curr = 1e16;
-  //   }
-  //
-  //
-  //
-  //   if (llh_curr < minllh) {
-  //     minllh = llh_curr;
-  //     indexofbest = naccepted; //get index in the pointlist of the best values
-  //   }
-  //
-  //   double alpha = std::min(1.0, exp(llh_last - llh_curr));
-  //   double r = rnd->Uniform(0,1);
-  //   accepted = false;
-  //   double acceptrate = double(naccepted)/double(ntested);
-  //   if (r < alpha) {
-  //     //success
-  //     accepted = true;
-  //     nllval->setVal(llh_curr);
-  //     RooArgList* point = (RooArgList*) _floatParamList->snapshot(kTRUE);
-  //     for (size_t index = 0; index < nparams; index++) {
-  //       RooRealVar* var = (RooRealVar*) point->at(index);
-  //       var->setVal(curr[index]);
-  //     }
-  //     point->addClone(*nllval);
-  //     _pointList.push_back(point);
-  //     naccepted++;
-  //     last = curr;
-  //
-  //   } else {
-  //     //reset to last candidate
-  //     accepted = false;
-  //     curr = last;
-  //   }
-  //
-  //   if (verbose) {
-  //     lastaccepted.insert(lastaccepted.begin(), accepted);
-  //     double lastratio = 0.0;
-  //     if (lastaccepted.size() > nlast)
-  //     {
-  //     //lastaccepted.push_back(accepted);
-  //     unsigned int nlastaccepted = 0;
-  //     for (unsigned int j=0; j<lastaccepted.size(); j++)
-  //     if (lastaccepted.at(j))
-  //       nlastaccepted++;
-  //     lastratio = double(nlastaccepted)/double(lastaccepted.size());
-  //     lastaccepted.pop_back();
-  //     }
-  //     if (accepted){
-  //       std::cout << "set " << i << " accepted, rate " << std::fixed << std::setprecision(3) << acceptrate << " last " << nlast << " " << lastratio << std::endl;
-  //     }
-  //     else{
-  //       std::cout << "set " << i << " rejected, rate " << std::fixed << std::setprecision(3) << acceptrate << " last " << nlast << " " << lastratio << std::endl;
-  //     }
-  //   }
-  //   ntested++;
-  //   //update S matrix
-  //   TMatrixDSym SNminusoneT(SNminusone);
-  //   SNminusoneT.T();
-  //   double etan = std::min(1.0, nparams*pow(double(i), -2.0/3.0));
-  //   TMatrixDSym WNWNT(nparams);
-  //   WNWNT.Zero();
-  //   for (int row = 0; row < WNWNT.GetNrows(); row++) {
-  //     for (int col = 0; col < WNWNT.GetNcols(); col++) {
-  //       WNWNT[row][col] = WN[row]*WN[col]/WN.Norm2Sqr();
-  //     }
-  //   }
-  //   TMatrixDSym SNSNT(identity + WNWNT*etan*(alpha-alphastar));
-  //   SNSNT = SNSNT.Similarity(SNminusone);
-  //
-  //   //SNSNT = (SNminusone*identity*SNminusoneT);
-  //   TDecompChol chol(SNSNT);
-  //   bool success = chol.Decompose();
-  //   assert(success);
-  //   TMatrixD SNT = chol.GetU();
-  //   TMatrixD SN(SNT);
-  //   SN.T();
-  //   for (int row = 0; row < SN.GetNrows(); row++) {
-  //     for (int col = 0; col < SN.GetNcols(); col++) {
-  //       SNminusone[row][col] = SN[row][col];
-  //     }
-  //   }
-  //   if (naccepted == npoints) {
-  //     break;
-  //   }
-  //
-  // }
-  // std::cout << "Time for walk: "<< (std::clock() - starttime) / (double)(CLOCKS_PER_SEC / 1000) << " ms" << std::endl;
 
   _cutoff = cutoff;
   _cutoffList.reserve(npoints - cutoff);
@@ -672,11 +598,11 @@ Int_t RooMinuitMCMC::mcmc(Int_t npoints, size_t cutoff, const char* errorstrateg
     RooArgList* point = (RooArgList*) _pointList[i];
     _cutoffList.push_back(point);
   }
-  std::cout << "cutoffList filled" << std::endl;
-
+  std::cout << "OBEN" << std::endl;
   if (_gaus) {
     getGausErrors();
   }
+  std::cout << "UNTEN" << std::endl;
   if (_interval) {
     for (size_t i = 0; i < nparams; i++) {
       RooArgList* point = (RooArgList*) _cutoffList[0];
@@ -1039,7 +965,6 @@ Int_t RooMinuitMCMC::getGausErrors()
   nOfTabs.reserve(nPar);
   size_t maxnOfTabs = 0;
 
-  std::cout << "getting names" << std::endl;
   for (int i = 0; i < nPar; i++) {
     size_t nOfTabscurr = 0;
     RooArgList* point = (RooArgList*) _cutoffList[0];
@@ -1055,14 +980,10 @@ Int_t RooMinuitMCMC::getGausErrors()
       maxnOfTabs = nOfTabscurr;
     }
   }
-  std::cout << "creating histograms" << std::endl;
   std::vector<TH1F*> hist1D;
   hist1D.reserve(nPar);
   for (int i = 0; i < nPar;i++) {
-    std::cout << "error oben" << std::endl;
-    std::cout << names[i] << std::endl;
     TH1F* hist = getWalkDisHis(names[i],100,kTRUE);
-    std::cout << "error unten" << std::endl;
     hist1D.push_back(hist);
   }
 
@@ -1094,6 +1015,7 @@ Int_t RooMinuitMCMC::getGausErrors()
     }
     cout<<"\t"<<hist1D[i]->GetRMS()<< std::endl;
     setPdfParamErr(i,hist1D[i]->GetRMS());
+    setPdfParamVal(i,hist1D[i]->GetMean());
   }
   std::cout << "" << std::endl;
   Double_t corr[nPar][nPar];
@@ -1280,6 +1202,7 @@ Double_t RooMinuitMCMC::getMinList(const char* name)
     RooRealVar* var = (RooRealVar*) point->at(index);
     if (var->getVal() < minval) {
       minval = var->getVal();
+
     }
   }
   return minval;

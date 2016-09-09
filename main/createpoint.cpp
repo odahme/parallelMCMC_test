@@ -63,7 +63,7 @@ int main(int argc,  char **argv) {
     RooAbsReal* nll = gauss->createNLL(data) ;
     RooMinuitMCMC* markov = new RooMinuitMCMC(*nll);
     markov->setSeed(35);
-    markov->mcmc(4000,100,"gaus",nthreads);
+    markov->mcmc(2000,200,"gaus",nthreads);
     std::cout << "walk finished" << std::endl;
     TMultiGraph* grmean = markov->getWalkDis("mean",kFALSE);
     TMultiGraph* grsigma = markov->getWalkDis("sigma",kFALSE);
