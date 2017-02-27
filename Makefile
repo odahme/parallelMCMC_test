@@ -6,9 +6,10 @@ DEBUG = false
 
 # compiler
 #CXX = g++ -std=c++0x
-CXX = icpc  -std=c++11 -pthread
+CXX = g++  -std=c++11
 #CXX = clang++ -std=c++11 # uncomment me to compile with clang
 #CXX =  valgrind --leak-check=yes #uncomment if you want to check for memory leaks
+#CXX = ACLiC
 
 # directories
 BIN_DIR = bin
