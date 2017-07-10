@@ -11,6 +11,6 @@ np=1000
 
 #running a MCMC to fit these points
 inputfilename="/home/oliver/parallelMCMC_test/pointStorage/simulatedgauspoints/gaus.txt"
-ncpu=2
+ncpu=1
 
 ./bin/createpoint $inputfilename $ncpu

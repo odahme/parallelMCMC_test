@@ -79,6 +79,8 @@
 #include "TStyle.h"
 #include "TMultiGraph.h"
 #include "TLine.h"
+#include "TThread.h"
+#include "TThreadPool.h"
 
 #include <cstdlib>
 
@@ -236,235 +238,202 @@ RooMinuitMCMC::~RooMinuitMCMC()
   // }
 }
 
-struct thread_data{
- int  thread_id;
- Int_t npoints;
- int indexofbest;
- TRandom3* rnd;
- TVectorD* last;
- TVectorD* curr;
- std::vector<RooArgList*> pointList;
- Bool_t verbose;
- RooArgList* paramList;
- RooRealVar* nllval;
- RooAbsReal* nll;
- RooArgList* threadParamList;
- RooRealVar* var;
+enum EProc {start, clean};
 
- TMatrixDSym* identity;
- TMatrixDSym* SNminusone;
- TMatrixDSym* SN;
- TVectorD* WN;
- TVectorD* SW;
- TMatrixDSym* S1;
- TMatrixDSym* SNminusoneT;
- TMatrixDSym* WNWNT;
- TMatrixDSym* SNSNT;
- TDecompChol* chol;
- TMatrixD* SNT;
- TMatrixD* SNM;
+class Taskmcmc: public TThreadPoolTaskImp<Taskmcmc, EProc> {
+  public:
+
+    Int_t npoints;
+    int indexofbest;
+    TRandom3* rnd;
+    TVectorD* last;
+    TVectorD* curr;
+    std::vector<RooArgList*> pointList;
+    Bool_t verbose;
+    RooArgList* paramList;
+    RooRealVar* nllval;
+    RooAbsReal* nll;
+    RooArgList* threadParamList;
+    RooRealVar* var;
+
+    TMatrixDSym* identity;
+    TMatrixDSym* SNminusone;
+    TMatrixDSym* SN;
+    TVectorD* WN;
+    TVectorD* SW;
+    TMatrixDSym* S1;
+    TMatrixDSym* SNminusoneT;
+    TMatrixDSym* WNWNT;
+    TMatrixDSym* SNSNT;
+    TDecompChol* chol;
+    TMatrixD* SNT;
+    TMatrixD* SNM;
+
+    bool runTask(EProc /*_param*/) {
+       m_tid = TThread::SelfId();
+       pointList.reserve(npoints);
+       paramList->add(*nllval);
+
+       size_t* nstat = new size_t;
+       *nstat = npoints * 100;//number of tries
+       double* maxstep = new double;
+       *maxstep = 0.01; //maximum step size
+       double* alphastar = new double;
+       *alphastar = 0.234; //forced acceptance rate
+       size_t* nparams = new size_t;
+       *nparams = (size_t) last->GetNoElements();
+
+       Bool_t* accepted = new Bool_t;
+       size_t* ntested = new size_t;
+       *ntested = 0;
+       Int_t* naccepted = new Int_t;
+       *naccepted = 0;
+
+
+
+
+       double* minllh = new double;
+       *minllh = 1e32;
+
+       size_t* nlast = new size_t;
+       *nlast = 200;
+
+       identity->UnitMatrix();
+
+       S1->Zero();
+       (*S1) = (*identity);
+
+       *SNminusone = *S1;
+       SN->Zero();
+
+
+       Bool_t* verbose = new Bool_t;
+       Bool_t* errorOn = new Bool_t;
+       *errorOn = true;
+
+
+       for(size_t index= 0; index < *nparams; index++) {
+         var = (RooRealVar*) threadParamList->at(index);
+         var->setVal((*last)[index]);
+       }
+       double* llh_last = new double;
+       *llh_last = nll->getVal(); //get nll for first parameters
+       double* llh_curr = new double;
+       double* alpha = new double;
+       double* r = new double;
+       double* acceptrate = new double;
+       double *etan = new double;
+       bool *success = new bool;
+       for (unsigned int i = 0; i < *nstat; i++) {
+
+          *curr = *last;//use value of last for current then vary
+
+
+
+         for (int j = 0; j < WN->GetNrows() ; j++) {
+           (*WN)[j] = rnd->Gaus(0.0, *maxstep);
+         }
+         *SW =  *SNminusone * *WN;
+         *curr += *SW;
+
+
+
+         for(size_t index= 0; index < *nparams; index++) {
+           var = (RooRealVar*) threadParamList->at(index);
+           var->setVal((*curr)[index]);
+         }
+
+          *llh_curr = nll->getVal(); //get nll for current parameters
+
+         if (llh_curr != llh_curr) {
+           if (errorOn) {
+             errorOn = false;
+             RooMsgService::instance().setGlobalKillBelow(RooFit::FATAL) ;
+           }
+           // std::cout << "press Enter to continue" << std::endl;
+           // std::cin.ignore();
+           *llh_curr = 1e16;
+         }
+
+
+
+         if (llh_curr < minllh) {
+           *minllh = *llh_curr;
+           indexofbest = *naccepted;
+         }
+
+         *alpha = std::min(1.0, exp(llh_last - llh_curr));
+         *r = rnd->Uniform(0,1);
+         *accepted = false;
+         *acceptrate = double(*naccepted)/double(*ntested);
+         if (*r < *alpha) {
+           //success
+
+           *accepted = true;
+           for (size_t i = 0; i < *nparams; i++) {
+             var = (RooRealVar*) paramList->at(i);
+             var->setVal((*curr)[i]);
+           }
+           var = (RooRealVar*) paramList->at(*nparams);
+           var->setVal(*llh_curr);
+
+           pointList.push_back((RooArgList*) paramList->snapshot(kTRUE));
+
+           *naccepted++;
+           *last = *curr;
+           *llh_last = *llh_curr;
+
+         } else {
+           //reset to last candidate
+           *accepted = false;
+           *curr = *last;
+
+         }
+
+         *ntested++;
+         //update S matrix
+
+         SNminusoneT = new TMatrixDSym(*SNminusone);
+
+         SNminusoneT->T();
+         *etan = std::min(1.0, *nparams * pow(double(i), -2.0/3.0));
+
+         WNWNT->Zero();
+         for (int row = 0; row < WNWNT->GetNrows(); row++) {
+           for (int col = 0; col < WNWNT->GetNcols(); col++) {
+             (*WNWNT)[row][col] = (*WN)[row]*(*WN)[col]/WN->Norm2Sqr();
+           }
+         }
+
+         *SNSNT = ((*identity) + (*WNWNT)* *etan *(*alpha-*alphastar));
+         *SNSNT = SNSNT->Similarity(*SNminusone);
+         //SNSNT = (SNminusone*identity*SNminusoneT);
+         *chol = (*SNSNT);
+         *success = chol->Decompose();
+         assert(*success);
+         *SNT = chol->GetU();
+         SNT->T();
+         for (int row = 0; row < SNT->GetNrows(); row++) {
+           for (int col = 0; col < SNT->GetNcols(); col++) {
+             (*SNminusone)[row][col] = (*SNT)[row][col];
+           }
+         }
+         if (*naccepted == npoints) {
+           break;
+         }
+
+       }
+       return true;
+     }
+     unsigned long threadID() const {
+        return m_tid;
+     }
+
+  private:
+     unsigned long m_tid;
 };
 
-pthread_attr_t attr;
 
-void *RooMinuitMCMC::threadmcmc(void *threadarg)
-{
-  struct thread_data *my_data;
-  my_data = (struct thread_data *) threadarg;
-
-  RooAbsReal* nll = my_data->nll;
-  RooArgList* threadParamList = my_data->threadParamList;
-  RooArgList* paramList = my_data->paramList;
-  RooRealVar* nllval = my_data->nllval;
-  paramList->addClone(*nllval);
-  RooRealVar* var = my_data->var;
-
-
-
-
-
-
-  size_t* id = new size_t;
-  *id = (int) my_data->thread_id ;
-  Int_t* npoints = new Int_t;
-  *npoints = (Int_t) my_data->npoints;
-  size_t* nparams = new size_t;
-  *nparams = (size_t) my_data->last->GetNoElements();
-  TVectorD* last = my_data->last;
-  TVectorD* curr = my_data->curr;
-  TRandom3 *rnd = my_data->rnd; //random generator with seed
-  my_data->pointList.reserve(*npoints);
-
-  TMatrixDSym* SNminusoneT = my_data->SNminusoneT;
-  TMatrixDSym* SNSNT = my_data->SNSNT;
-  TDecompChol* chol = my_data->chol;
-  TMatrixD* SNT = my_data->SNT;
-  TMatrixDSym* WNWNT = my_data->WNWNT;
-
-
-
-
-
-
-
-
-  //size_t mystacksize;
-  //pthread_attr_getstacksize (&attr, &mystacksize);
-
-  size_t* nstat = new size_t;
-  *nstat = *npoints * 100;//number of tries
-  double* maxstep = new double;
-  *maxstep = 0.01; //maximum step size
-  double* alphastar = new double;
-  *alphastar = 0.234; //forced acceptance rate
-
-
-  Bool_t* accepted = new Bool_t;
-  size_t* ntested = new size_t;
-  *ntested = 0;
-  Int_t* naccepted = new Int_t;
-  *naccepted = 0;
-
-
-
-
-  double* minllh = new double;
-  *minllh = 1e32;
-
-  size_t* nlast = new size_t;
-  *nlast = 200;
-
-  TMatrixDSym* identity = my_data->identity;
-  identity->UnitMatrix();
-
-  TMatrixDSym* S1 = my_data->S1;
-  S1->Zero();
-  (*S1) = (*identity);
-
-  TMatrixDSym* SNminusone = my_data->SNminusone;
-  *SNminusone = *S1;
-  TMatrixDSym* SN = my_data->SN;
-  SN->Zero();
-
-
-  Bool_t* verbose = new Bool_t;
-  *verbose = my_data->verbose;
-  Bool_t* errorOn = new Bool_t;
-  *errorOn = true;
-
-
-  TVectorD* SW = my_data->SW;
-  TVectorD* WN = my_data->WN;
-  for(size_t index= 0; index < *nparams; index++) {
-    var = (RooRealVar*) threadParamList->at(index);
-    var->setVal((*last)[index]);
-  }
-  double* llh_last = new double;
-  *llh_last = nll->getVal(); //get nll for first parameters
-  double* llh_curr = new double;
-  double* alpha = new double;
-  double* r = new double;
-  double* acceptrate = new double;
-  double *etan = new double;
-  bool *success = new bool;
-
-  for (unsigned int i = 0; i < *nstat; i++) {
-
-     *curr = *last;//use value of last for current then vary
-
-
-    for (int j = 0; j < WN->GetNrows() ; j++) {
-      (*WN)[j] = rnd->Gaus(0.0, *maxstep);
-    }
-    *SW =  *SNminusone * *WN;
-    *curr += *SW;
-
-
-
-    for(size_t index= 0; index < *nparams; index++) {
-      var = (RooRealVar*) threadParamList->at(index);
-      var->setVal((*curr)[index]);
-    }
-
-     *llh_curr = nll->getVal(); //get nll for current parameters
-
-    if (llh_curr != llh_curr) {
-      if (errorOn) {
-        errorOn = false;
-        RooMsgService::instance().setGlobalKillBelow(RooFit::FATAL) ;
-      }
-      // std::cout << "press Enter to continue" << std::endl;
-      // std::cin.ignore();
-      *llh_curr = 1e16;
-    }
-
-
-
-    if (llh_curr < minllh) {
-      *minllh = *llh_curr;
-      my_data->indexofbest = *naccepted;
-    }
-
-    *alpha = std::min(1.0, exp(llh_last - llh_curr));
-    *r = rnd->Uniform(0,1);
-    *accepted = false;
-    *acceptrate = double(*naccepted)/double(*ntested);
-    if (*r < *alpha) {
-      //success
-      *accepted = true;
-      for (size_t i = 0; i < *nparams; i++) {
-        var = (RooRealVar*) paramList->at(i);
-        var->setVal((*curr)[i]);
-      }
-      var = (RooRealVar*) paramList->at(*nparams);
-      var->setVal(*llh_curr);
-
-      my_data->pointList.push_back((RooArgList*) paramList->snapshot(kTRUE));
-      *naccepted++;
-      *last = *curr;
-      *llh_last = *llh_curr;
-
-    } else {
-      //reset to last candidate
-      *accepted = false;
-      *curr = *last;
-    }
-
-    *ntested++;
-    //update S matrix
-
-    SNminusoneT = new TMatrixDSym(*SNminusone);
-
-    SNminusoneT->T();
-    *etan = std::min(1.0, *nparams * pow(double(i), -2.0/3.0));
-
-    WNWNT->Zero();
-    for (int row = 0; row < WNWNT->GetNrows(); row++) {
-      for (int col = 0; col < WNWNT->GetNcols(); col++) {
-        (*WNWNT)[row][col] = (*WN)[row]*(*WN)[col]/WN->Norm2Sqr();
-      }
-    }
-
-    *SNSNT = ((*identity) + (*WNWNT)* *etan *(*alpha-*alphastar));
-    *SNSNT = SNSNT->Similarity(*SNminusone);
-    //SNSNT = (SNminusone*identity*SNminusoneT);
-    *chol = (*SNSNT);
-    *success = chol->Decompose();
-    assert(*success);
-    *SNT = chol->GetU();
-    SNT->T();
-    for (int row = 0; row < SNT->GetNrows(); row++) {
-      for (int col = 0; col < SNT->GetNcols(); col++) {
-        (*SNminusone)[row][col] = (*SNT)[row][col];
-      }
-    }
-    if (*naccepted == *npoints) {
-      break;
-    }
-
-  }
-  pthread_exit((void*) id);
-}
 
 Int_t RooMinuitMCMC::mcmc(Int_t npoints, size_t cutoff, const char* errorstrategy, size_t nthreads)
 {
@@ -511,34 +480,37 @@ Int_t RooMinuitMCMC::mcmc(Int_t npoints, size_t cutoff, const char* errorstrateg
   delete startpoint;
 
 
-  pthread_t threads[nthreads];
-  struct thread_data td[nthreads];
-  void* status;
-  pthread_attr_t attr;
-  int rc;
-  pthread_attr_init(&attr);
-  //pthread_attr_setstacksize (&attr, stacksize);
-  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-  for (size_t i = 0; i < nthreads; i++) {
+  cout << "ThreadPool: starting..." << endl;
+  // number of tasks to process
+  size_t numTasks(nthreads*2);
+
+  // create a thread pool object
+  // _numThreads - a number of threads in the pool
+  // _needDbg - defines whether to show debug messages
+  TThreadPool<Taskmcmc, EProc> threadPool(nthreads);
+
+  // create a container of tasks
+  vector <Taskmcmc> tasksList(numTasks);
+  for (size_t i = 0; i < numTasks; i++) {
     TRandom3* rnd = new TRandom3(_seed+i);
     string nllName = "nllval"+to_string(i);
     RooRealVar* nllval = new RooRealVar(nllName.c_str(),"nllval of parameters",-1);
-    td[i].thread_id = i;
-    td[i].nll = (RooAbsReal*) _func->Clone();
-    RooArgSet* paramSet = td[i].nll->getParameters(RooArgSet()) ;
+    tasksList[i].nll = (RooAbsReal*) _func->Clone();
+    RooArgSet* paramSet = tasksList[i].nll->getParameters(RooArgSet()) ;
     RooArgList paramList(*paramSet) ;
     delete paramSet ;
-    td[i].threadParamList = (RooArgList*) paramList.selectByAttrib("Constant",kFALSE) ;
-    td[i].paramList = (RooArgList*) td[i].threadParamList->snapshot(kFALSE);
-    td[i].npoints = npoints/nthreads;
-    std::cout << "npoints per thread = "<<npoints/nthreads << std::endl;
-    td[i].indexofbest = 0;
-    td[i].rnd = (TRandom3*) rnd->Clone();
-    td[i].last = (TVectorD*) last.Clone();
-    td[i].curr = (TVectorD*) last.Clone();
-    td[i].verbose = _verbose;
-    td[i].paramList = (RooArgList*) _floatParamList->snapshot(kFALSE);
-    td[i].nllval = (RooRealVar*) nllval->Clone();
+    RooArgList* tempParamList = (RooArgList*) paramList.selectByAttrib("Constant",kFALSE) ;
+    tasksList[i].threadParamList = (RooArgList*) tempParamList->Clone();
+    // tasksList[i].paramList = (RooArgList*) tasksList[i].threadParamList->snapshot(kFALSE);
+    tasksList[i].npoints = npoints/numTasks;
+    std::cout << "npoints per task = "<<npoints/numTasks << std::endl;
+    tasksList[i].indexofbest = 0;
+    tasksList[i].rnd = (TRandom3*) rnd->Clone();
+    tasksList[i].last = (TVectorD*) last.Clone();
+    tasksList[i].curr = (TVectorD*) last.Clone();
+    tasksList[i].verbose = _verbose;
+    tasksList[i].paramList = (RooArgList*) _floatParamList->Clone();
+    tasksList[i].nllval = (RooRealVar*) nllval->Clone();
     TMatrixDSym identity(nparams);
     TMatrixDSym SNminusone(nparams);
     TMatrixDSym SN(nparams);
@@ -550,47 +522,47 @@ Int_t RooMinuitMCMC::mcmc(Int_t npoints, size_t cutoff, const char* errorstrateg
     TMatrixDSym SNSNT(nparams);
     TDecompChol chol(nparams);
     TMatrixD SNT(nparams,nparams);
-    td[i].identity = (TMatrixDSym*) identity.Clone();
-    td[i].SNminusone = (TMatrixDSym*) SNminusone.Clone();
-    td[i].SN = (TMatrixDSym*) SN.Clone();
-    td[i].WN = (TVectorD*) WN.Clone();
-    td[i].SW = (TVectorD*) SW.Clone();
-    td[i].S1 = (TMatrixDSym*) S1.Clone();
-    td[i].SNminusone = (TMatrixDSym*) SNminusone.Clone();
-    td[i].WNWNT = (TMatrixDSym*) WNWNT.Clone();
-    td[i].SNSNT = (TMatrixDSym*) SNSNT.Clone();
-    td[i].chol = (TDecompChol*) chol.Clone();
-    td[i].SNT = (TMatrixD*) SNT.Clone();
-
-
-    rc = pthread_create(&threads[i], &attr, threadmcmc, (void*) &td[i]);
-    if (rc){
-     cout << "Error:unable to create thread," << rc << endl;
-     exit(-1);
-    }
+    tasksList[i].identity = (TMatrixDSym*) identity.Clone();
+    tasksList[i].SNminusone = (TMatrixDSym*) SNminusone.Clone();
+    tasksList[i].SN = (TMatrixDSym*) SN.Clone();
+    tasksList[i].WN = (TVectorD*) WN.Clone();
+    tasksList[i].SW = (TVectorD*) SW.Clone();
+    tasksList[i].S1 = (TMatrixDSym*) S1.Clone();
+    tasksList[i].SNminusone = (TMatrixDSym*) SNminusone.Clone();
+    tasksList[i].WNWNT = (TMatrixDSym*) WNWNT.Clone();
+    tasksList[i].SNSNT = (TMatrixDSym*) SNSNT.Clone();
+    tasksList[i].chol = (TDecompChol*) chol.Clone();
+    tasksList[i].SNT = (TMatrixD*) SNT.Clone();
   }
-  pthread_attr_destroy(&attr);
-  for(size_t t=0; t<nthreads; t++)
-  {
-   rc = pthread_join(threads[t], &status);
-   if (rc) {
-      printf("ERROR; return code from pthread_join() is %d\n", rc);
-      exit(-1);
-      }
+  cout << "ThreadPool: getting tasks..." << endl;
+  cout << "ThreadPool: processing tasks..." << endl;
+
+  // push tasks to the ThreadPool
+  // tasks can be also pushed asynchronously
+  for (size_t i = 0; i < numTasks; ++i) {
+     threadPool.PushTask(tasksList[i], start);
   }
 
-  int bestthread = td[0].indexofbest;
-  RooArgList* bestpoint = td[0].pointList[bestthread];
-  _floatParamList = (RooArgList*) bestpoint->snapshot(kTRUE);
-
+  // Stop thread pool.
+  // The parameter "true" requests the calling thread to wait,
+  // until the thread pool task queue is drained.
+  threadPool.Stop(true);
+  cout << "ThreadPool: done" << endl;
   _pointList.reserve(npoints);
+  std::cout << "npoints = "<< npoints << std::endl;
+  std::cout << "numTasks = "<< numTasks << std::endl;
 
-  for (size_t i = 0; i < nthreads; i++) {
-    for (size_t j = 0; j < npoints/nthreads; j++) {
-      RooArgList* point = (RooArgList*) td[i].pointList[j]->snapshot(kTRUE);
+
+    std::cout << "OBEN" << std::endl;
+  for (size_t i = 0; i < numTasks; i++) {
+    for (size_t j = 0; j < npoints/numTasks; j++) {
+      std::cout << "i,j = "<<i<<","<<j << std::endl;
+      RooArgList* point = (RooArgList*) tasksList[i].pointList[j]->snapshot(kTRUE);
+
       _pointList.push_back(point);
     }
   }
+  std::cout << "UNTEN" << std::endl;
 
   _cutoff = cutoff;
   _cutoffList.reserve(npoints - cutoff);
@@ -598,11 +570,11 @@ Int_t RooMinuitMCMC::mcmc(Int_t npoints, size_t cutoff, const char* errorstrateg
     RooArgList* point = (RooArgList*) _pointList[i];
     _cutoffList.push_back(point);
   }
-  std::cout << "OBEN" << std::endl;
+
   if (_gaus) {
     getGausErrors();
   }
-  std::cout << "UNTEN" << std::endl;
+
   if (_interval) {
     for (size_t i = 0; i < nparams; i++) {
       RooArgList* point = (RooArgList*) _cutoffList[0];
@@ -613,9 +585,9 @@ Int_t RooMinuitMCMC::mcmc(Int_t npoints, size_t cutoff, const char* errorstrateg
   }
 
   for (size_t i = 0; i < nthreads; i++) {
-    delete td[i].last;
-    delete td[i].paramList;
-    td[i].pointList.clear();
+    delete tasksList[i].last;
+    delete tasksList[i].paramList;
+    tasksList[i].pointList.clear();
   }
 
   return 1;
